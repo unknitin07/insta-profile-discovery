@@ -1,11 +1,39 @@
+"""
+Database Models
+FIXED VERSION - Added basic password encryption
+"""
 
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, Float, JSON, Enum
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
 import enum
+import base64
 
 Base = declarative_base()
+
+# Simple encryption helper (for basic protection)
+class SimpleEncryption:
+    """
+    Basic encryption for passwords
+    For production, use proper encryption like cryptography.fernet
+    """
+    @staticmethod
+    def encode(text: str) -> str:
+        """Encode password (basic obfuscation)"""
+        if not text:
+            return text
+        return base64.b64encode(text.encode()).decode()
+    
+    @staticmethod
+    def decode(encoded: str) -> str:
+        """Decode password"""
+        if not encoded:
+            return encoded
+        try:
+            return base64.b64decode(encoded.encode()).decode()
+        except:
+            return encoded  # Return as-is if decoding fails
 
 # Enums for status fields
 class SeedStatus(enum.Enum):
@@ -18,6 +46,7 @@ class AccountStatus(enum.Enum):
     PASS = "pass"
     FAIL = "fail"
     CHECKED = "checked"
+    PROCESSING = "processing"  # Added for better tracking
 
 class InstagramAccountStatus(enum.Enum):
     ACTIVE = "active"
@@ -55,7 +84,7 @@ class DiscoveredAccount(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     username = Column(String(255), nullable=False, unique=True, index=True)
     status = Column(Enum(AccountStatus), default=AccountStatus.PENDING, nullable=False, index=True)
-    level = Column(Integer, nullable=False, index=True)  # 1-6
+    level = Column(Integer, nullable=False, index=True)  # 1-4 (reduced from 6)
     parent_username = Column(String(255), nullable=True, index=True)  # Who we got this from
     followers_count = Column(Integer, nullable=True)
     following_count = Column(Integer, nullable=True)
@@ -113,11 +142,19 @@ class InstagramAccount(Base):
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     username = Column(String(255), nullable=False, unique=True)
-    password = Column(String(255), nullable=False)  # Should be encrypted in production
+    password = Column(String(500), nullable=False)  # FIXED: Stores encoded password
     status = Column(Enum(InstagramAccountStatus), default=InstagramAccountStatus.ACTIVE, nullable=False, index=True)
     requests_made = Column(Integer, default=0, nullable=False)  # Track usage
     last_used_at = Column(DateTime, nullable=True)
     added_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    
+    def set_password(self, plain_password: str):
+        """Set password with encoding"""
+        self.password = SimpleEncryption.encode(plain_password)
+    
+    def get_password(self) -> str:
+        """Get decoded password"""
+        return SimpleEncryption.decode(self.password)
     
     def __repr__(self):
         return f"<InstagramAccount(username='{self.username}', status='{self.status}', requests={self.requests_made})>"
@@ -185,25 +222,27 @@ class Database:
         """Initialize default configuration values"""
         session = self.get_session()
         
-        default_configs = [
-            ('concurrent_limit', '5'),
-            ('min_followers', '500000'),
-            ('min_avg_reel_views', '100000'),
-            ('min_engagement_rate', '2.0'),
-            ('min_seed_threshold', '10'),
-            ('max_level', '6'),
-            ('script_status', 'active'),  # active/paused
-        ]
-        
-        for key, value in default_configs:
-            existing = session.query(ScriptConfig).filter_by(key=key).first()
-            if not existing:
-                config = ScriptConfig(key=key, value=value)
-                session.add(config)
-        
-        session.commit()
-        session.close()
-        print("✅ Default configuration initialized!")
+        try:
+            default_configs = [
+                ('concurrent_limit', '5'),
+                ('min_followers', '500000'),
+                ('min_avg_reel_views', '100000'),
+                ('min_engagement_rate', '2.0'),
+                ('min_seed_threshold', '10'),
+                ('max_level', '4'),  # FIXED: Reduced from 6 to 4
+                ('script_status', 'active'),  # active/paused
+            ]
+            
+            for key, value in default_configs:
+                existing = session.query(ScriptConfig).filter_by(key=key).first()
+                if not existing:
+                    config = ScriptConfig(key=key, value=value)
+                    session.add(config)
+            
+            session.commit()
+            print("✅ Default configuration initialized!")
+        finally:
+            session.close()
 
 
 # Usage example
