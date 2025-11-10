@@ -1,6 +1,7 @@
 """
 Main Entry Point - Instagram Influencer Finder
 Starts both the Telegram bot and processing loop
+FIXED VERSION - Session management and error handling improved
 """
 
 import os
@@ -11,7 +12,7 @@ from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from database.models import Database, InstagramAccount, ScriptConfig
+from database.models import Database, InstagramAccount, ScriptConfig, InstagramAccountStatus
 from core.scraper import InstagramScraper
 from core.criteria import CriteriaChecker
 from core.contact_extractor import ContactExtractor
@@ -40,18 +41,20 @@ def initialize_database():
 def load_instagram_accounts(db):
     """Load Instagram accounts from database"""
     session = db.get_session()
-    accounts = session.query(InstagramAccount).filter(
-        InstagramAccount.status == 'active'
-    ).all()
-    session.close()
-    
-    account_list = [
-        {'username': acc.username, 'password': acc.password}
-        for acc in accounts
-    ]
-    
-    logger.info(f"📱 Loaded {len(account_list)} Instagram accounts")
-    return account_list
+    try:
+        accounts = session.query(InstagramAccount).filter(
+            InstagramAccount.status == InstagramAccountStatus.ACTIVE
+        ).all()
+        
+        account_list = [
+            {'username': acc.username, 'password': acc.password}
+            for acc in accounts
+        ]
+        
+        logger.info(f"📱 Loaded {len(account_list)} Instagram accounts")
+        return account_list
+    finally:
+        session.close()
 
 
 def start_processing_loop(queue_manager):
@@ -62,7 +65,7 @@ def start_processing_loop(queue_manager):
     except KeyboardInterrupt:
         logger.info("⏹️ Processing loop interrupted")
     except Exception as e:
-        logger.error(f"❌ Processing loop error: {e}")
+        logger.error(f"❌ Processing loop error: {e}", exc_info=True)
 
 
 def main():
@@ -86,14 +89,16 @@ def main():
         # 3. Initialize components
         logger.info("🔧 Initializing components...")
         
-        # Scraper
+        # Scraper (only if accounts exist)
         scraper = InstagramScraper(instagram_accounts) if instagram_accounts else None
         
         # Criteria Checker
         session = db.get_session()
-        config_entries = session.query(ScriptConfig).all()
-        config = {entry.key: entry.value for entry in config_entries}
-        session.close()
+        try:
+            config_entries = session.query(ScriptConfig).all()
+            config = {entry.key: entry.value for entry in config_entries}
+        finally:
+            session.close()
         
         criteria_config = {
             'min_followers': int(config.get('min_followers', 500000)),
@@ -104,11 +109,10 @@ def main():
         criteria_checker = CriteriaChecker(criteria_config)
         contact_extractor = ContactExtractor()
         
-        # Queue Manager
+        # Queue Manager (FIXED: Pass Database object, not session)
         if scraper:
-            session = db.get_session()
             queue_manager = QueueManager(
-                session, 
+                db,  # Pass Database object, not session
                 scraper, 
                 criteria_checker, 
                 contact_extractor
