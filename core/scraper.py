@@ -1,9 +1,11 @@
 """
 Instagram Scraper - Fetches profile data, reels, and followings
-Uses instagrapi library with account rotation
+FIXED VERSION - Session persistence, better rate limiting, error handling
 """
 
 import time
+import os
+import json
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 import logging
@@ -12,7 +14,8 @@ from instagrapi.exceptions import (
     LoginRequired, 
     ChallengeRequired, 
     RateLimitError,
-    ClientError
+    ClientError,
+    TwoFactorRequired
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -21,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 class InstagramScraper:
     """
-    Handles Instagram data fetching with account rotation
+    Handles Instagram data fetching with account rotation and session persistence
     """
     
     def __init__(self, accounts: List[Dict[str, str]]):
@@ -34,44 +37,121 @@ class InstagramScraper:
         self.accounts = accounts
         self.current_account_index = 0
         self.clients = {}  # username -> Client instance
-        self.account_requests = {}  # Track requests per account
-        self.max_requests_per_account = 200  # Before rotation
+        
+        # FIXED: Track requests per hour instead of total
+        self.account_request_times = {}  # username -> list of timestamps
+        self.max_requests_per_hour = 50  # More realistic limit
+        
+        # Create sessions directory
+        self.sessions_dir = 'sessions'
+        os.makedirs(self.sessions_dir, exist_ok=True)
         
         # Initialize first account
         if accounts:
             self._login_current_account()
+    
+    def _get_session_file(self, username: str) -> str:
+        """Get session file path for username"""
+        return os.path.join(self.sessions_dir, f"{username}.json")
+    
+    def _check_hourly_rate_limit(self, username: str) -> bool:
+        """Check if account has exceeded hourly rate limit"""
+        if username not in self.account_request_times:
+            return True
+        
+        now = time.time()
+        hour_ago = now - 3600
+        
+        # Remove timestamps older than 1 hour
+        recent_requests = [t for t in self.account_request_times[username] if t > hour_ago]
+        self.account_request_times[username] = recent_requests
+        
+        if len(recent_requests) >= self.max_requests_per_hour:
+            logger.warning(f"⏰ Account {username} hit hourly rate limit ({len(recent_requests)}/{self.max_requests_per_hour})")
+            return False
+        
+        return True
+    
+    def _record_request(self, username: str):
+        """Record a request timestamp for rate limiting"""
+        if username not in self.account_request_times:
+            self.account_request_times[username] = []
+        
+        self.account_request_times[username].append(time.time())
     
     def _get_current_client(self) -> Tuple[Client, str]:
         """Get current active client and username"""
         if not self.accounts:
             raise Exception("No Instagram accounts available")
         
-        current = self.accounts[self.current_account_index]
-        username = current['username']
+        # Try to find an account that's not rate limited
+        attempts = 0
+        while attempts < len(self.accounts):
+            current = self.accounts[self.current_account_index]
+            username = current['username']
+            
+            if self._check_hourly_rate_limit(username):
+                if username not in self.clients:
+                    self._login_account(username, current['password'])
+                
+                if username in self.clients:
+                    return self.clients[username], username
+            
+            # Try next account
+            self._rotate_account()
+            attempts += 1
         
-        if username not in self.clients:
-            self._login_account(username, current['password'])
-        
-        return self.clients[username], username
+        raise Exception("All accounts are rate limited or unavailable")
     
     def _login_account(self, username: str, password: str) -> bool:
-        """Login to Instagram account"""
+        """
+        Login to Instagram account with session persistence
+        FIXED: Saves and loads sessions to avoid re-login
+        """
         try:
             logger.info(f"Logging in to Instagram account: {username}")
             client = Client()
-            client.delay_range = [2, 5]  # Random delay between requests
+            client.delay_range = [2, 5]
             
-            # Try to login
-            client.login(username, password)
+            session_file = self._get_session_file(username)
+            
+            # Try to load existing session
+            if os.path.exists(session_file):
+                try:
+                    logger.info(f"Loading saved session for {username}")
+                    client.load_settings(session_file)
+                    client.login(username, password)
+                    
+                    # Test if session is valid
+                    client.get_timeline_feed()
+                    logger.info(f"✅ Session restored successfully for {username}")
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ Saved session invalid for {username}, logging in fresh: {e}")
+                    os.remove(session_file)
+                    client = Client()
+                    client.delay_range = [2, 5]
+                    client.login(username, password)
+                    client.dump_settings(session_file)
+            else:
+                # Fresh login
+                logger.info(f"Fresh login for {username}")
+                client.login(username, password)
+                client.dump_settings(session_file)
+                logger.info(f"✅ Session saved for {username}")
             
             self.clients[username] = client
-            self.account_requests[username] = 0
+            self.account_request_times[username] = []
             
             logger.info(f"✅ Successfully logged in: {username}")
             return True
             
+        except TwoFactorRequired:
+            logger.error(f"❌ 2FA required for {username} - please disable 2FA or handle manually")
+            return False
         except (LoginRequired, ChallengeRequired) as e:
             logger.error(f"❌ Login failed for {username}: {str(e)}")
+            logger.error(f"   This account may be flagged. Try logging in manually via Instagram app.")
             return False
         except Exception as e:
             logger.error(f"❌ Unexpected error logging in {username}: {str(e)}")
@@ -89,47 +169,53 @@ class InstagramScraper:
         """Rotate to next Instagram account"""
         self.current_account_index = (self.current_account_index + 1) % len(self.accounts)
         logger.info(f"🔄 Rotating to account {self.current_account_index + 1}/{len(self.accounts)}")
-        self._login_current_account()
-    
-    def _increment_requests(self, username: str):
-        """Track requests and rotate if needed"""
-        self.account_requests[username] = self.account_requests.get(username, 0) + 1
         
-        if self.account_requests[username] >= self.max_requests_per_account:
-            logger.warning(f"⚠️ Account {username} hit request limit, rotating...")
-            self._rotate_account()
+        current = self.accounts[self.current_account_index]
+        username = current['username']
+        
+        # Only login if not already logged in
+        if username not in self.clients:
+            self._login_current_account()
     
     def _safe_request(self, func, *args, max_retries=3, **kwargs):
-        """Execute request with retry logic and account rotation"""
+        """
+        Execute request with retry logic and account rotation
+        FIXED: Better error handling and rate limit respect
+        """
         retries = 0
         
         while retries < max_retries:
             try:
                 client, username = self._get_current_client()
                 result = func(client, *args, **kwargs)
-                self._increment_requests(username)
+                self._record_request(username)
                 return result
                 
-            except RateLimitError:
-                logger.warning("⚠️ Rate limit hit, rotating account...")
+            except RateLimitError as e:
+                logger.warning(f"⚠️ Rate limit hit: {e}")
                 self._rotate_account()
                 retries += 1
-                time.sleep(5)
+                time.sleep(10 * retries)  # Exponential backoff
                 
-            except (LoginRequired, ChallengeRequired):
-                logger.warning("⚠️ Login required, rotating account...")
+            except (LoginRequired, ChallengeRequired) as e:
+                logger.warning(f"⚠️ Login issue: {e}")
+                # Remove this client and try next account
+                current = self.accounts[self.current_account_index]
+                username = current['username']
+                if username in self.clients:
+                    del self.clients[username]
                 self._rotate_account()
                 retries += 1
                 
             except ClientError as e:
                 logger.error(f"❌ Client error: {str(e)}")
                 retries += 1
-                time.sleep(3)
+                time.sleep(5 * retries)
                 
             except Exception as e:
                 logger.error(f"❌ Unexpected error: {str(e)}")
                 retries += 1
-                time.sleep(3)
+                time.sleep(5 * retries)
         
         raise Exception(f"Failed after {max_retries} retries")
     
@@ -170,7 +256,7 @@ class InstagramScraper:
         
         Args:
             username: Instagram username
-            count: Number of reels to fetch
+            count: Number of reels to fetch (max 5)
         
         Returns:
             List of reel data dicts
@@ -199,13 +285,14 @@ class InstagramScraper:
             logger.error(f"Failed to get reels for {username}: {str(e)}")
             return []
     
-    def get_user_followings(self, username: str, max_count: int = 1000) -> List[str]:
+    def get_user_followings(self, username: str, max_count: int = 100) -> List[str]:
         """
         Get list of usernames that this user follows
+        FIXED: Reduced from 1000 to 100 for better performance
         
         Args:
             username: Instagram username
-            max_count: Maximum followings to fetch
+            max_count: Maximum followings to fetch (default 100)
         
         Returns:
             List of usernames
@@ -270,6 +357,7 @@ class InstagramScraper:
             'username': username,
             'is_logged_in': False,
             'is_working': False,
+            'requests_this_hour': 0,
             'error': None,
             'checked_at': datetime.utcnow().isoformat()
         }
@@ -280,6 +368,13 @@ class InstagramScraper:
                 client.account_info()
                 status['is_logged_in'] = True
                 status['is_working'] = True
+                
+                # Get request count
+                if username in self.account_request_times:
+                    now = time.time()
+                    hour_ago = now - 3600
+                    recent = [t for t in self.account_request_times[username] if t > hour_ago]
+                    status['requests_this_hour'] = len(recent)
             else:
                 status['error'] = "Not logged in"
         
