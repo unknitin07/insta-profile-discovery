@@ -1,6 +1,6 @@
 """
 Telegram Bot - Admin panel for controlling the script
-WITH ADMIN-ONLY ACCESS CONTROL
+FIXED VERSION - Uses password encryption methods
 """
 
 import logging
@@ -192,6 +192,7 @@ Adding Seeds:
 
 Adding Instagram Accounts:
 • /add_account myuser mypass - Adds scraping account
+  (Passwords are encrypted for basic security)
 
 Viewing Stats:
 • /stats - Shows pending, passed, failed counts
@@ -205,6 +206,11 @@ Configuration:
 
 Get Your ID:
 • /myid - Shows your Telegram User ID (for admin setup)
+
+⚠️ Important Notes:
+- Max level is set to 4 (not 6) for better performance
+- Each account limited to 50 requests/hour
+- Sessions are saved to avoid re-login
 
 Need help? Contact your administrator.
         """
@@ -236,6 +242,7 @@ Discovered Accounts:
 
 Configuration:
 • Concurrent Limit: {stats['config'].get('concurrent_limit', 'N/A')}
+• Max Level: {stats['config'].get('max_level', 'N/A')}
 • Min Followers: {stats['config'].get('min_followers', 'N/A')}
 • Min Reel Views: {stats['config'].get('min_avg_reel_views', 'N/A')}
 • Min Engagement: {stats['config'].get('min_engagement_rate', 'N/A')}%
@@ -260,26 +267,27 @@ Configuration:
         try:
             session = self.db.get_session()
             
-            existing = session.query(SeedUsername).filter(
-                SeedUsername.username == username
-            ).first()
-            
-            if existing:
-                await update.message.reply_text(f"⚠️ @{username} already exists!")
+            try:
+                existing = session.query(SeedUsername).filter(
+                    SeedUsername.username == username
+                ).first()
+                
+                if existing:
+                    await update.message.reply_text(f"⚠️ @{username} already exists!")
+                    return
+                
+                seed = SeedUsername(
+                    username=username,
+                    instagram_url=f"https://instagram.com/{username}",
+                    status=SeedStatus.PENDING
+                )
+                session.add(seed)
+                session.commit()
+                
+                await update.message.reply_text(f"✅ Added seed: @{username}")
+                logger.info(f"Admin added seed username: {username}")
+            finally:
                 session.close()
-                return
-            
-            seed = SeedUsername(
-                username=username,
-                instagram_url=f"https://instagram.com/{username}",
-                status=SeedStatus.PENDING
-            )
-            session.add(seed)
-            session.commit()
-            session.close()
-            
-            await update.message.reply_text(f"✅ Added seed: @{username}")
-            logger.info(f"Admin added seed username: {username}")
             
         except Exception as e:
             await update.message.reply_text(f"❌ Error: {str(e)}")
@@ -309,33 +317,35 @@ Configuration:
         
         try:
             session = self.db.get_session()
-            added = 0
-            skipped = 0
-            
-            for username in usernames:
-                existing = session.query(SeedUsername).filter(
-                    SeedUsername.username == username
-                ).first()
+            try:
+                added = 0
+                skipped = 0
                 
-                if existing:
-                    skipped += 1
-                    continue
+                for username in usernames:
+                    existing = session.query(SeedUsername).filter(
+                        SeedUsername.username == username
+                    ).first()
+                    
+                    if existing:
+                        skipped += 1
+                        continue
+                    
+                    seed = SeedUsername(
+                        username=username,
+                        instagram_url=f"https://instagram.com/{username}",
+                        status=SeedStatus.PENDING
+                    )
+                    session.add(seed)
+                    added += 1
                 
-                seed = SeedUsername(
-                    username=username,
-                    instagram_url=f"https://instagram.com/{username}",
-                    status=SeedStatus.PENDING
+                session.commit()
+                
+                await update.message.reply_text(
+                    f"✅ Added: {added}\n⚠️ Skipped (duplicates): {skipped}"
                 )
-                session.add(seed)
-                added += 1
-            
-            session.commit()
-            session.close()
-            
-            await update.message.reply_text(
-                f"✅ Added: {added}\n⚠️ Skipped (duplicates): {skipped}"
-            )
-            logger.info(f"Admin added {added} seed usernames in bulk")
+                logger.info(f"Admin added {added} seed usernames in bulk")
+            finally:
+                session.close()
             
         except Exception as e:
             await update.message.reply_text(f"❌ Error: {str(e)}")
@@ -348,7 +358,10 @@ Configuration:
         return ConversationHandler.END
     
     async def add_account_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Add Instagram scraping account"""
+        """
+        Add Instagram scraping account
+        FIXED: Uses password encryption
+        """
         if not await self._check_admin(update):
             return
         
@@ -362,26 +375,32 @@ Configuration:
         try:
             session = self.db.get_session()
             
-            existing = session.query(InstagramAccount).filter(
-                InstagramAccount.username == username
-            ).first()
-            
-            if existing:
-                await update.message.reply_text(f"⚠️ Account {username} already exists!")
+            try:
+                existing = session.query(InstagramAccount).filter(
+                    InstagramAccount.username == username
+                ).first()
+                
+                if existing:
+                    await update.message.reply_text(f"⚠️ Account {username} already exists!")
+                    return
+                
+                # FIXED: Use password encryption
+                account = InstagramAccount(
+                    username=username,
+                    status=InstagramAccountStatus.ACTIVE
+                )
+                account.set_password(password)  # Encrypt password
+                
+                session.add(account)
+                session.commit()
+                
+                await update.message.reply_text(
+                    f"✅ Added Instagram account: {username}\n"
+                    f"⚠️ Please restart the bot for changes to take effect!"
+                )
+                logger.info(f"Admin added Instagram account: {username}")
+            finally:
                 session.close()
-                return
-            
-            account = InstagramAccount(
-                username=username,
-                password=password,
-                status=InstagramAccountStatus.ACTIVE
-            )
-            session.add(account)
-            session.commit()
-            session.close()
-            
-            await update.message.reply_text(f"✅ Added Instagram account: {username}")
-            logger.info(f"Admin added Instagram account: {username}")
             
         except Exception as e:
             await update.message.reply_text(f"❌ Error: {str(e)}")
@@ -393,24 +412,26 @@ Configuration:
         
         try:
             session = self.db.get_session()
-            accounts = session.query(InstagramAccount).all()
-            session.close()
-            
-            if not accounts:
-                await update.message.reply_text("❌ No Instagram accounts added yet!")
-                return
-            
-            message = "📱 Instagram Accounts Status:\n\n"
-            
-            for account in accounts:
-                status_emoji = "✅" if account.status == InstagramAccountStatus.ACTIVE else "❌"
-                message += f"{status_emoji} {account.username} - {account.status.value}\n"
-                message += f"   Requests: {account.requests_made}\n"
-                if account.last_used_at:
-                    message += f"   Last used: {account.last_used_at.strftime('%Y-%m-%d %H:%M')}\n"
-                message += "\n"
-            
-            await update.message.reply_text(message)
+            try:
+                accounts = session.query(InstagramAccount).all()
+                
+                if not accounts:
+                    await update.message.reply_text("❌ No Instagram accounts added yet!")
+                    return
+                
+                message = "📱 Instagram Accounts Status:\n\n"
+                
+                for account in accounts:
+                    status_emoji = "✅" if account.status == InstagramAccountStatus.ACTIVE else "❌"
+                    message += f"{status_emoji} {account.username} - {account.status.value}\n"
+                    message += f"   Requests: {account.requests_made}\n"
+                    if account.last_used_at:
+                        message += f"   Last used: {account.last_used_at.strftime('%Y-%m-%d %H:%M')}\n"
+                    message += "\n"
+                
+                await update.message.reply_text(message)
+            finally:
+                session.close()
             
         except Exception as e:
             await update.message.reply_text(f"❌ Error: {str(e)}")
@@ -436,24 +457,26 @@ Configuration:
                 return
             
             session = self.db.get_session()
-            config = session.query(ScriptConfig).filter(
-                ScriptConfig.key == 'concurrent_limit'
-            ).first()
-            
-            if config:
-                config.value = str(limit)
-                config.updated_at = datetime.utcnow()
-            else:
-                config = ScriptConfig(key='concurrent_limit', value=str(limit))
-                session.add(config)
-            
-            session.commit()
-            session.close()
-            
-            self.queue_manager.concurrent_limit = limit
-            
-            await update.message.reply_text(f"✅ Concurrent limit set to: {limit}")
-            logger.info(f"Admin set concurrent limit to: {limit}")
+            try:
+                config = session.query(ScriptConfig).filter(
+                    ScriptConfig.key == 'concurrent_limit'
+                ).first()
+                
+                if config:
+                    config.value = str(limit)
+                    config.updated_at = datetime.utcnow()
+                else:
+                    config = ScriptConfig(key='concurrent_limit', value=str(limit))
+                    session.add(config)
+                
+                session.commit()
+                
+                self.queue_manager.concurrent_limit = limit
+                
+                await update.message.reply_text(f"✅ Concurrent limit set to: {limit}")
+                logger.info(f"Admin set concurrent limit to: {limit}")
+            finally:
+                session.close()
             
         except ValueError:
             await update.message.reply_text("❌ Invalid number!")
@@ -467,23 +490,24 @@ Configuration:
         
         session = self.db.get_session()
         
-        min_followers = session.query(ScriptConfig).filter(ScriptConfig.key == 'min_followers').first()
-        min_views = session.query(ScriptConfig).filter(ScriptConfig.key == 'min_avg_reel_views').first()
-        min_engagement = session.query(ScriptConfig).filter(ScriptConfig.key == 'min_engagement_rate').first()
-        
-        session.close()
-        
-        message = f"""
+        try:
+            min_followers = session.query(ScriptConfig).filter(ScriptConfig.key == 'min_followers').first()
+            min_views = session.query(ScriptConfig).filter(ScriptConfig.key == 'min_avg_reel_views').first()
+            min_engagement = session.query(ScriptConfig).filter(ScriptConfig.key == 'min_engagement_rate').first()
+            
+            message = f"""
 ⚙️ Current Criteria:
 
 • Min Followers: {min_followers.value if min_followers else 'N/A'}
 • Min Avg Reel Views: {min_views.value if min_views else 'N/A'}
 • Min Engagement Rate: {min_engagement.value if min_engagement else 'N/A'}%
 
-To update, use database directly or contact admin.
-        """
-        
-        await update.message.reply_text(message)
+To update, edit these in the database or contact admin.
+            """
+            
+            await update.message.reply_text(message)
+        finally:
+            session.close()
     
     async def view_config_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """View all configuration"""
@@ -513,29 +537,33 @@ To update, use database directly or contact admin.
         
         try:
             session = self.db.get_session()
-            influencers = session.query(PassedInfluencer).order_by(
-                PassedInfluencer.contact_extracted_at.desc()
-            ).limit(10).all()
-            session.close()
-            
-            if not influencers:
-                await update.message.reply_text("❌ No passed influencers yet!")
-                return
-            
-            message = "🎯 Recent Passed Influencers:\n\n"
-            
-            for inf in influencers:
-                message += f"👤 @{inf.username}\n"
-                message += f"   Followers: {inf.followers_count:,}\n"
-                message += f"   Avg Views: {inf.avg_reel_views:,}\n"
-                message += f"   Engagement: {inf.engagement_rate}%\n"
-                if inf.telegram_link:
-                    message += f"   💬 Telegram: {inf.telegram_link}\n"
-                if inf.email:
-                    message += f"   📧 Email: {inf.email}\n"
-                message += "\n"
-            
-            await update.message.reply_text(message)
+            try:
+                influencers = session.query(PassedInfluencer).order_by(
+                    PassedInfluencer.contact_extracted_at.desc()
+                ).limit(10).all()
+                
+                if not influencers:
+                    await update.message.reply_text("❌ No passed influencers yet!")
+                    return
+                
+                message = "🎯 Recent Passed Influencers:\n\n"
+                
+                for inf in influencers:
+                    message += f"👤 @{inf.username}\n"
+                    message += f"   Followers: {inf.followers_count:,}\n"
+                    if inf.avg_reel_views:
+                        message += f"   Avg Views: {inf.avg_reel_views:,}\n"
+                    if inf.engagement_rate:
+                        message += f"   Engagement: {inf.engagement_rate}%\n"
+                    if inf.telegram_link:
+                        message += f"   💬 Telegram: {inf.telegram_link}\n"
+                    if inf.email:
+                        message += f"   📧 Email: {inf.email}\n"
+                    message += "\n"
+                
+                await update.message.reply_text(message)
+            finally:
+                session.close()
             
         except Exception as e:
             await update.message.reply_text(f"❌ Error: {str(e)}")
@@ -547,50 +575,52 @@ To update, use database directly or contact admin.
         
         try:
             session = self.db.get_session()
-            influencers = session.query(PassedInfluencer).all()
-            session.close()
-            
-            if not influencers:
-                await update.message.reply_text("❌ No data to export!")
-                return
-            
-            # Create CSV
-            output = io.StringIO()
-            writer = csv.writer(output)
-            
-            # Header
-            writer.writerow([
-                'Username', 'Full Name', 'Followers', 'Avg Reel Views', 
-                'Engagement Rate', 'Telegram', 'Email', 'Phone', 
-                'Website', 'Bio', 'Level Found', 'Date'
-            ])
-            
-            # Data
-            for inf in influencers:
+            try:
+                influencers = session.query(PassedInfluencer).all()
+                
+                if not influencers:
+                    await update.message.reply_text("❌ No data to export!")
+                    return
+                
+                # Create CSV
+                output = io.StringIO()
+                writer = csv.writer(output)
+                
+                # Header
                 writer.writerow([
-                    inf.username,
-                    inf.full_name or '',
-                    inf.followers_count,
-                    inf.avg_reel_views or '',
-                    inf.engagement_rate or '',
-                    inf.telegram_link or '',
-                    inf.email or '',
-                    inf.phone or '',
-                    inf.website or '',
-                    inf.bio or '',
-                    inf.level_found or '',
-                    inf.contact_extracted_at.strftime('%Y-%m-%d')
+                    'Username', 'Full Name', 'Followers', 'Avg Reel Views', 
+                    'Engagement Rate', 'Telegram', 'Email', 'Phone', 
+                    'Website', 'Bio', 'Level Found', 'Date'
                 ])
-            
-            # Send as file
-            output.seek(0)
-            await update.message.reply_document(
-                document=output.getvalue().encode('utf-8'),
-                filename=f'influencers_{datetime.now().strftime("%Y%m%d")}.csv',
-                caption=f"📊 Exported {len(influencers)} influencers"
-            )
-            
-            logger.info(f"Admin exported {len(influencers)} influencers")
+                
+                # Data
+                for inf in influencers:
+                    writer.writerow([
+                        inf.username,
+                        inf.full_name or '',
+                        inf.followers_count,
+                        inf.avg_reel_views or '',
+                        inf.engagement_rate or '',
+                        inf.telegram_link or '',
+                        inf.email or '',
+                        inf.phone or '',
+                        inf.website or '',
+                        (inf.bio or '').replace('\n', ' ')[:100],  # Limit bio length
+                        inf.level_found or '',
+                        inf.contact_extracted_at.strftime('%Y-%m-%d')
+                    ])
+                
+                # Send as file
+                output.seek(0)
+                await update.message.reply_document(
+                    document=output.getvalue().encode('utf-8'),
+                    filename=f'influencers_{datetime.now().strftime("%Y%m%d")}.csv',
+                    caption=f"📊 Exported {len(influencers)} influencers"
+                )
+                
+                logger.info(f"Admin exported {len(influencers)} influencers")
+            finally:
+                session.close()
             
         except Exception as e:
             await update.message.reply_text(f"❌ Error exporting: {str(e)}")
